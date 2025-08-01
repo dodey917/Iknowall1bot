@@ -1,103 +1,116 @@
 import os
 import json
-import re
-import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Load environment variables
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
+GOOGLE_CREDENTIALS = json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
 
-class GoogleDocsClient:
-    def __init__(self):
-        try:
-            # Try to load from environment variable first
-            service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
-            if service_account_json:
-                self.creds = service_account.Credentials.from_service_account_info(
-                    json.loads(service_account_json),
-                    scopes=['https://www.googleapis.com/auth/documents.readonly']
-                )
-            else:
-                # Fall back to service account file if environment variable not set
-                self.creds = service_account.Credentials.from_service_account_file(
-                    'service_account.json',
-                    scopes=['https://www.googleapis.com/auth/documents.readonly']
-                )
-            
-            self.service = build('docs', 'v1', credentials=self.creds)
-            logger.info("Google Docs client initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize Google Docs client: {e}")
-            raise
+# Initialize Google Docs service
+credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
+service = build('docs', 'v1', credentials=credentials)
 
-    def find_answer(self, question):
-        try:
-            doc = self.service.documents().get(documentId=os.getenv('GOOGLE_DOC_ID')).execute()
-            content = self._extract_text(doc)
-            
-            # Find Q&A pairs
-            qa_pairs = re.findall(r'Q:\s*(.*?)\s*A:\s*(.*?)(?=\nQ:|$)', content, re.DOTALL)
-            
-            # Find best matching question
-            question_lower = question.lower()
-            for q, a in qa_pairs:
-                if question_lower in q.lower() or q.lower() in question_lower:
-                    return a.strip()
-            return "I'm not sure about that. Could you ask differently?"
-        except Exception as e:
-            logger.error(f"Error finding answer: {e}")
-            return "Sorry, I'm having trouble accessing the information."
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Hello! I'm a bot that can answer your questions. Just ask me anything!")
 
-    def _extract_text(self, doc):
-        text = []
-        for elem in doc.get('body', {}).get('content', []):
-            if 'paragraph' in elem:
-                for para_elem in elem['paragraph']['elements']:
-                    if 'textRun' in para_elem:
-                        text.append(para_elem['textRun']['content'])
-        return ''.join(text)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+    I'm a Q&A bot powered by a Google Doc. Here's what you can do:
+    
+    - Ask me any question that might be in my knowledge base
+    - Type /start to see my welcome message
+    - Type /help to see this message
+    
+    My answers come directly from a curated Google Doc!
+    """
+    await update.message.reply_text(help_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        # Show typing indicator
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id,
-            action="typing"
-        )
-        
-        answer = docs_client.find_answer(update.message.text)
-        await update.message.reply_text(answer)
-    except Exception as e:
-        logger.error(f"Error handling message: {e}")
-        await update.message.reply_text("Sorry, I encountered an error processing your request.")
-
-def main():
-    # Verify required environment variables
-    required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    message_type = update.message.chat.type
+    text = update.message.text.strip()
     
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        return
+    # Skip processing if message is from a group (unless the bot is mentioned)
+    if message_type == 'group' or message_type == 'supergroup':
+        if not text.startswith('@your_bot_username'):
+            return
+    
+    # Get response from Google Doc
+    response = get_response_from_doc(text)
+    
+    if response:
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("I'm not sure how to answer that. Try asking something else!")
 
+def get_response_from_doc(question):
     try:
-        global docs_client
-        docs_client = GoogleDocsClient()
+        # Get the document content
+        doc = service.documents().get(documentId=GOOGLE_DOC_ID).execute()
+        content = doc.get('body', {}).get('content', [])
         
-        app = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        # Extract all text from the document
+        full_text = ""
+        for element in content:
+            if 'paragraph' in element:
+                for paragraph_element in element['paragraph']['elements']:
+                    if 'textRun' in paragraph_element:
+                        full_text += paragraph_element['textRun']['content']
         
-        logger.info("Starting bot in polling mode (Background Worker)...")
-        app.run_polling()
+        # Split into Q&A pairs
+        qa_pairs = []
+        current_q = None
+        current_a = None
+        
+        for line in full_text.split('\n'):
+            line = line.strip()
+            if line.startswith('Q:'):
+                if current_q and current_a:  # Save previous pair
+                    qa_pairs.append((current_q, current_a))
+                current_q = line[2:].strip()  # Remove 'Q:'
+                current_a = None
+            elif line.startswith('A:'):
+                current_a = line[2:].strip()  # Remove 'A:'
+        
+        # Add the last pair if exists
+        if current_q and current_a:
+            qa_pairs.append((current_q, current_a))
+        
+        # Find the best matching question
+        best_match = None
+        best_score = 0
+        question_lower = question.lower()
+        
+        for q, a in qa_pairs:
+            q_lower = q.lower()
+            # Simple matching - you could implement more sophisticated matching here
+            if question_lower in q_lower or q_lower in question_lower:
+                score = len(set(question_lower.split()) & set(q_lower.split()))
+                if score > best_score:
+                    best_score = score
+                    best_match = a
+        
+        return best_match
+    
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
+        print(f"Error accessing Google Doc: {e}")
+        return None
 
 if __name__ == '__main__':
-    main()
+    print('Starting bot...')
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Commands
+    app.add_handler(CommandHandler('start', start_command))
+    app.add_handler(CommandHandler('help', help_command))
+    
+    # Messages
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+    
+    # Errors would be handled here
+    
+    print('Polling...')
+    app.run_polling(poll_interval=3)
