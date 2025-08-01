@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import asyncio
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -19,50 +18,67 @@ class GoogleDocsClient:
     def __init__(self):
         try:
             service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+            if not service_account_json:
+                raise ValueError("Missing Google service account credentials")
+            
             self.creds = service_account.Credentials.from_service_account_info(
                 json.loads(service_account_json),
                 scopes=['https://www.googleapis.com/auth/documents.readonly']
             )
             self.service = build('docs', 'v1', credentials=self.creds)
-            logger.info("Google Docs client initialized")
+            logger.info("Google Docs client initialized successfully")
         except Exception as e:
-            logger.error(f"Google Docs init failed: {e}")
+            logger.error(f"Failed to initialize Google Docs client: {e}")
             raise
 
     def find_answer(self, question):
         try:
             doc = self.service.documents().get(documentId=os.getenv('GOOGLE_DOC_ID')).execute()
-            content = ''.join(
-                para_elem['textRun']['content']
-                for elem in doc.get('body', {}).get('content', [])
-                if 'paragraph' in elem
-                for para_elem in elem['paragraph']['elements']
-                if 'textRun' in para_elem
-            )
+            content = self._extract_text(doc)
             
-            for q, a in re.findall(r'Q:\s*(.*?)\s*A:\s*(.*?)(?=\nQ:|$)', content, re.DOTALL):
-                if question.lower() in q.lower() or q.lower() in question.lower():
+            # Find Q&A pairs
+            qa_pairs = re.findall(r'Q:\s*(.*?)\s*A:\s*(.*?)(?=\nQ:|$)', content, re.DOTALL)
+            
+            # Find best matching question
+            question_lower = question.lower()
+            for q, a in qa_pairs:
+                if question_lower in q.lower() or q.lower() in question_lower:
                     return a.strip()
             return "I'm not sure about that. Could you ask differently?"
         except Exception as e:
             logger.error(f"Error finding answer: {e}")
             return "Sorry, I'm having trouble accessing the information."
 
+    def _extract_text(self, doc):
+        text = []
+        for elem in doc.get('body', {}).get('content', []):
+            if 'paragraph' in elem:
+                for para_elem in elem['paragraph']['elements']:
+                    if 'textRun' in para_elem:
+                        text.append(para_elem['textRun']['content'])
+        return ''.join(text)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        await asyncio.sleep(1)
+        # Show typing indicator
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id,
+            action="typing"
+        )
+        
         answer = docs_client.find_answer(update.message.text)
         await update.message.reply_text(answer)
     except Exception as e:
         logger.error(f"Error handling message: {e}")
-        await update.message.reply_text("Sorry, I encountered an error.")
+        await update.message.reply_text("Sorry, I encountered an error processing your request.")
 
 def main():
     # Verify required environment variables
     required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID', 'GOOGLE_SERVICE_ACCOUNT_JSON']
-    if missing := [var for var in required_vars if not os.getenv(var)]:
-        logger.error(f"Missing required variables: {', '.join(missing)}")
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
 
     try:
@@ -74,7 +90,6 @@ def main():
         
         logger.info("Starting bot in polling mode...")
         app.run_polling()
-        
     except Exception as e:
         logger.error(f"Bot failed to start: {e}")
 
