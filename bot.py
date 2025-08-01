@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -27,17 +28,30 @@ class GoogleDocsClient:
         self.service = self._authenticate()
     
     def _authenticate(self):
-        # Read service account credentials from environment variable
-        service_account_info = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
-        if not service_account_info:
-            raise ValueError("Google service account credentials not found")
+        # Try both environment variable and file-based authentication
+        try:
+            # First try getting credentials from environment variable
+            service_account_info = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+            if service_account_info:
+                creds = service_account.Credentials.from_service_account_info(
+                    json.loads(service_account_info),
+                    scopes=self.SCOPES
+                )
+                return build('docs', 'v1', credentials=creds)
             
-        creds = service_account.Credentials.from_service_account_info(
-            eval(service_account_info),
-            scopes=self.SCOPES
-        )
-        return build('docs', 'v1', credentials=creds)
-    
+            # Fall back to service account file if environment variable not set
+            if os.path.exists('service_account.json'):
+                creds = service_account.Credentials.from_service_account_file(
+                    'service_account.json',
+                    scopes=self.SCOPES
+                )
+                return build('docs', 'v1', credentials=creds)
+            
+            raise ValueError("No Google service account credentials found")
+        except Exception as e:
+            logger.error(f"Authentication failed: {e}")
+            raise
+
     def get_document_content(self, document_id):
         try:
             document = self.service.documents().get(documentId=document_id).execute()
@@ -51,9 +65,6 @@ class GoogleDocsClient:
         except Exception as e:
             logger.error(f"Error fetching Google Doc: {e}")
             return "Sorry, I couldn't fetch the document content right now."
-
-# Initialize Google Docs client
-docs_client = GoogleDocsClient()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -71,19 +82,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # Verify required environment variables
-    required_vars = {
-        'BOT_TOKEN': 'Telegram bot token',
-        'GOOGLE_DOC_ID': 'Google Docs document ID',
-        'GOOGLE_SERVICE_ACCOUNT_JSON': 'Google service account credentials'
-    }
+    required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
     
-    missing_vars = [name for name in required_vars if not os.getenv(name)]
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         logger.info("Please set these in your Render.com environment settings")
         return
 
     try:
+        global docs_client
+        docs_client = GoogleDocsClient()
+        
         application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
         
         # Add handlers
