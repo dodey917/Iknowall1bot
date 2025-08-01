@@ -17,14 +17,20 @@ logger = logging.getLogger(__name__)
 class GoogleDocsClient:
     def __init__(self):
         try:
+            # Try to load from environment variable first
             service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
-            if not service_account_json:
-                raise ValueError("Missing Google service account credentials")
+            if service_account_json:
+                self.creds = service_account.Credentials.from_service_account_info(
+                    json.loads(service_account_json),
+                    scopes=['https://www.googleapis.com/auth/documents.readonly']
+                )
+            else:
+                # Fall back to service account file if environment variable not set
+                self.creds = service_account.Credentials.from_service_account_file(
+                    'service_account.json',
+                    scopes=['https://www.googleapis.com/auth/documents.readonly']
+                )
             
-            self.creds = service_account.Credentials.from_service_account_info(
-                json.loads(service_account_json),
-                scopes=['https://www.googleapis.com/auth/documents.readonly']
-            )
             self.service = build('docs', 'v1', credentials=self.creds)
             logger.info("Google Docs client initialized successfully")
         except Exception as e:
@@ -74,7 +80,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # Verify required environment variables
-    required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID', 'GOOGLE_SERVICE_ACCOUNT_JSON']
+    required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -88,7 +94,7 @@ def main():
         app = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        logger.info("Starting bot in polling mode...")
+        logger.info("Starting bot in polling mode (Background Worker)...")
         app.run_polling()
     except Exception as e:
         logger.error(f"Bot failed to start: {e}")
