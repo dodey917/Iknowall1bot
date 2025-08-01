@@ -11,26 +11,31 @@ from telegram.ext import (
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# Set up logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
+# Suppress Google API cache warning
+logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 
 class GoogleDocsClient:
     def __init__(self):
         self.SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
-        self.service_account_file = 'service_account.json'
         self.service = self._authenticate()
     
     def _authenticate(self):
-        creds = service_account.Credentials.from_service_account_file(
-            self.service_account_file, scopes=self.SCOPES)
+        # Read service account credentials from environment variable
+        service_account_info = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+        if not service_account_info:
+            raise ValueError("Google service account credentials not found")
+            
+        creds = service_account.Credentials.from_service_account_info(
+            eval(service_account_info),
+            scopes=self.SCOPES
+        )
         return build('docs', 'v1', credentials=creds)
     
     def get_document_content(self, document_id):
@@ -45,7 +50,7 @@ class GoogleDocsClient:
             return ''.join(content)
         except Exception as e:
             logger.error(f"Error fetching Google Doc: {e}")
-            return "Sorry, I couldn't fetch the document content."
+            return "Sorry, I couldn't fetch the document content right now."
 
 # Initialize Google Docs client
 docs_client = GoogleDocsClient()
@@ -57,27 +62,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    logger.info(f"User message: {user_message}")
-    
-    doc_content = docs_client.get_document_content(GOOGLE_DOC_ID)
-    await update.message.reply_text(doc_content[:4000])  # Telegram has 4096 char limit
+    try:
+        doc_content = docs_client.get_document_content(os.getenv('GOOGLE_DOC_ID'))
+        await update.message.reply_text(doc_content[:4000])  # Telegram has 4096 char limit
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
+        await update.message.reply_text("Sorry, I encountered an error processing your request.")
 
 def main():
-    # Validate environment variables
-    if not TELEGRAM_TOKEN or not GOOGLE_DOC_ID:
-        raise ValueError("Missing required environment variables")
+    # Verify required environment variables
+    required_vars = {
+        'BOT_TOKEN': 'Telegram bot token',
+        'GOOGLE_DOC_ID': 'Google Docs document ID',
+        'GOOGLE_SERVICE_ACCOUNT_JSON': 'Google service account credentials'
+    }
     
-    # Create and configure bot
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Start bot
-    logger.info("Bot is starting...")
-    application.run_polling()
+    missing_vars = [name for name in required_vars if not os.getenv(name)]
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        logger.info("Please set these in your Render.com environment settings")
+        return
+
+    try:
+        application = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        logger.info("Bot is starting...")
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
 
 if __name__ == '__main__':
     main()
