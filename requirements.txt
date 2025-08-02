@@ -1,4 +1,4 @@
-python-telegram-bot==20.3
+python-telegram-bot[webhooks]==20.3
 google-api-python-client==2.84.0
 google-auth-oauthlib==1.0.0
 python-dotenv==1.0.0
