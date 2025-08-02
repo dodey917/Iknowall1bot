@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import hashlib
 import time
+import asyncio
 
 # Configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8270027311:AAH5xcgSuyrfNEadhx7TM2TGYYQ3BWZpFDU')
@@ -102,39 +103,44 @@ def parse_content(content):
             current_q = None
     return pairs
 
-async def check_doc_updates(context: ContextTypes.DEFAULT_TYPE):
+async def check_doc_updates(app: Application):
     global qa_pairs, last_doc_hash, last_checked
     
-    current_time = time.time()
-    if current_time - last_checked < CHECK_INTERVAL:
-        return
-    
-    last_checked = current_time
-    doc_service = GoogleDocService()
-    content = doc_service.get_document_content(GOOGLE_DOC_ID)
-    
-    if content is None:
-        return
-    
-    content_hash = hashlib.md5(content.encode()).hexdigest()
-    
-    if content_hash != last_doc_hash:
-        last_doc_hash = content_hash
-        new_pairs = parse_content(content)
+    while True:
+        current_time = time.time()
+        if current_time - last_checked < CHECK_INTERVAL:
+            await asyncio.sleep(60)  # Sleep for 1 minute before checking again
+            continue
         
-        if new_pairs != qa_pairs:
-            qa_pairs = new_pairs
-            logger.info("QA pairs updated from Google Doc")
+        last_checked = current_time
+        doc_service = GoogleDocService()
+        content = doc_service.get_document_content(GOOGLE_DOC_ID)
+        
+        if content is None:
+            await asyncio.sleep(60)
+            continue
+        
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        
+        if content_hash != last_doc_hash:
+            last_doc_hash = content_hash
+            new_pairs = parse_content(content)
             
-            # Notify admin about the update
-            for admin_id in ADMIN_IDS:
-                try:
-                    await context.bot.send_message(
-                        chat_id=admin_id,
-                        text="📝 Google Doc content has been updated. Bot responses refreshed."
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to notify admin {admin_id}: {e}")
+            if new_pairs != qa_pairs:
+                qa_pairs = new_pairs
+                logger.info("QA pairs updated from Google Doc")
+                
+                # Notify admin about the update
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=admin_id,
+                            text="📝 Google Doc content has been updated. Bot responses refreshed."
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+        await asyncio.sleep(60)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -178,7 +184,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(response)
 
-def main():
+async def post_init(app: Application):
     # Initialize Google Doc content
     global qa_pairs, last_doc_hash
     
@@ -188,17 +194,17 @@ def main():
         qa_pairs = parse_content(content)
         last_doc_hash = hashlib.md5(content.encode()).hexdigest()
     
+    # Start the background task
+    app.create_task(check_doc_updates(app))
+
+def main():
     # Create the Application and pass it your bot's token.
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Add job queue to check for doc updates
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_doc_updates, interval=CHECK_INTERVAL, first=10)
     
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
