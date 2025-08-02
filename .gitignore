@@ -1,5 +1,12 @@
 .env
-service_account.json
 __pycache__/
-*.py[cod]
-*.env
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+credentials.json
