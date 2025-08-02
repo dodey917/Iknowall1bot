@@ -1,12 +1,12 @@
-import hashlib
-from datetime import datetime, timedelta
-import time
-from difflib import SequenceMatcher
-import logging
-import json
 import os
+import json
+import hashlib
+import logging
+from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,10 @@ class GoogleDocQA:
         self.last_refresh = datetime.min
         self.content_hash = None
         self.refresh_interval = timedelta(minutes=5)
-        self.response_cache = {}
-        self.cache_expiry = timedelta(hours=24)  # Cache for 24 hours
         self.initialize_service()
 
     def initialize_service(self):
-        """Initialize Google Docs API service"""
+        """Initialize Google Docs API service with retry logic"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -30,28 +28,21 @@ class GoogleDocQA:
                     json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
                 )
                 self.service = build('docs', 'v1', credentials=credentials)
-                logger.info("Google Docs service don setup!")
+                logger.info("Google Docs service initialized successfully")
                 return
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"E don burst! No fit connect to Google Docs after {max_retries} tries: {e}")
+                    logger.error(f"Failed to initialize Google Docs service after {max_retries} attempts: {e}")
                     raise
-                logger.warning(f"De try again to connect (try {attempt + 1})...")
+                logger.warning(f"Retry {attempt + 1} for Google Docs initialization...")
                 time.sleep(2 ** attempt)
 
-    def _clean_cache(self):
-        """Remove expired cache entries"""
-        now = datetime.now()
-        expired_keys = [k for k, v in self.response_cache.items() if now - v['timestamp'] > self.cache_expiry]
-        for key in expired_keys:
-            del self.response_cache[key]
-
     def get_content_hash(self, content):
-        """Generate hash for document content"""
+        """Generate SHA-256 hash of document content"""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
     def parse_qa_pairs(self, content):
-        """Parse Q&A pairs"""
+        """Robust Q&A pair parsing from document content"""
         qa_pairs = []
         current_q = current_a = None
         buffer = []
@@ -60,9 +51,9 @@ class GoogleDocQA:
             nonlocal current_q, current_a, buffer
             if buffer:
                 text = ' '.join(buffer).strip()
-                if current_q is None and text.startswith('Q:'):
+                if current_q is None and text.lower().startswith('q:'):
                     current_q = text[2:].strip()
-                elif current_q is not None and text.startswith('A:'):
+                elif current_q is not None and text.lower().startswith('a:'):
                     current_a = text[2:].strip()
                 buffer = []
 
@@ -72,7 +63,7 @@ class GoogleDocQA:
                 flush_buffer()
                 continue
 
-            if line.startswith(('Q:', 'A:')) and buffer:
+            if line.lower().startswith(('q:', 'a:')) and buffer:
                 flush_buffer()
 
             buffer.append(line)
@@ -85,14 +76,16 @@ class GoogleDocQA:
         return qa_pairs
 
     def refresh_qa_pairs(self, force=False):
-        """Refresh Q&A pairs"""
+        """Refresh Q&A pairs from Google Docs with change detection"""
         try:
+            # Skip if not forced and within refresh interval
             if not force and datetime.now() - self.last_refresh < self.refresh_interval:
                 return True
 
-            logger.info("De refresh the Q&A pairs from Google Doc...")
+            logger.info("Refreshing Q&A pairs from Google Doc...")
             doc = self.service.documents().get(documentId=os.getenv('GOOGLE_DOC_ID')).execute()
             
+            # Extract document content efficiently
             content = []
             for element in doc.get('body', {}).get('content', []):
                 if 'paragraph' in element:
@@ -101,66 +94,38 @@ class GoogleDocQA:
                             content.append(para_elem['textRun']['content'])
             full_content = '\n'.join(content)
 
+            # Check for content changes
             new_hash = self.get_content_hash(full_content)
             if not force and self.content_hash == new_hash:
-                logger.debug("No new tin for Google Doc")
+                logger.debug("No changes detected in Google Doc")
                 self.last_refresh = datetime.now()
                 return True
 
+            # Parse and update Q&A pairs
             new_pairs = self.parse_qa_pairs(full_content)
             if not new_pairs:
-                logger.warning("No Q&A pairs inside this doc o!")
+                logger.warning("No Q&A pairs found in document")
                 return False
 
             self.qa_pairs = new_pairs
             self.content_hash = new_hash
             self.last_refresh = datetime.now()
-            logger.info(f"Don refresh {len(self.qa_pairs)} Q&A pairs")
+            logger.info(f"Successfully refreshed {len(self.qa_pairs)} Q&A pairs")
             return True
 
+        except HttpError as e:
+            logger.error(f"Google Docs API error: {e.resp.status} {e.content.decode('utf-8')}")
+            return False
         except Exception as e:
-            logger.error(f"Error don happen for refresh Q&A pairs: {str(e)}", exc_info=True)
+            logger.error(f"Error refreshing Q&A pairs: {str(e)}", exc_info=True)
             return False
 
     def get_answer(self, question, similarity_threshold=0.6):
-        """Get answer with Naija flavor"""
-        try:
-            self._clean_cache()
-            
-            question_lower = question.lower().strip()
-            if not question_lower:
-                return "Abeg ask question jare!"
+        """Find best matching answer with similarity scoring"""
+        if not question or not isinstance(question, str):
+            return None
 
-            # Check cache first - ensures single response per question
-            cache_key = hash(question_lower)
-            if cache_key in self.response_cache:
-                return self.response_cache[cache_key]['response']
-
-            # Find best match
-            answer = self._find_best_match(question_lower, similarity_threshold)
-            if not answer and self.refresh_qa_pairs():
-                answer = self._find_best_match(question_lower, similarity_threshold)
-
-            # Add Naija flavor to responses
-            if not answer:
-                answer = "I no sabi answer to that question. Try ask am another way."
-            else:
-                answer = self._naija_flavor(answer)
-
-            # Cache the response for 24 hours
-            self.response_cache[cache_key] = {
-                'response': answer,
-                'timestamp': datetime.now()
-            }
-
-            return answer
-
-        except Exception as e:
-            logger.error(f"Wahala don happen: {str(e)}", exc_info=True)
-            return "E don be! My brain no dey work now. Try again small time."
-
-    def _find_best_match(self, question_lower, similarity_threshold):
-        """Find best matching answer"""
+        question_lower = question.lower().strip()
         best_match = None
         highest_score = 0
 
@@ -176,28 +141,3 @@ class GoogleDocQA:
                 best_match = a
 
         return best_match if highest_score >= similarity_threshold else None
-
-    def _naija_flavor(self, text):
-        """Add Naija pidgin flavor to responses"""
-        phrases = {
-            "hello": "How you dey!",
-            "hi": "Wetin dey happen!",
-            "thank you": "No wahala!",
-            "thanks": "I dey appreciate!",
-            "sorry": "No vex!",
-            "please": "Abeg!",
-            "help": "I go help you!",
-            "what's up": "How body!",
-            "how are you": "How you dey feel today?"
-        }
-        
-        # Convert specific phrases
-        for eng, naija in phrases.items():
-            if eng.lower() in text.lower():
-                return naija
-        
-        # Add general Naija flavor
-        if "?" in text:
-            return text.replace("?", " abi?")
-        
-        return f"{text}... no be so?"
