@@ -2,6 +2,13 @@ import hashlib
 from datetime import datetime, timedelta
 import time
 from difflib import SequenceMatcher
+import logging
+import json
+import os
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+logger = logging.getLogger(__name__)
 
 class GoogleDocQA:
     def __init__(self):
@@ -9,17 +16,19 @@ class GoogleDocQA:
         self.qa_pairs = []
         self.last_refresh = datetime.min
         self.content_hash = None
-        self.refresh_interval = timedelta(minutes=5)  # Check for updates every 5 minutes
-        self.response_cache = {}  # Cache to track responses
-        self.cache_expiry = timedelta(hours=1)  # Cache duration
+        self.refresh_interval = timedelta(minutes=5)
+        self.response_cache = {}
+        self.cache_expiry = timedelta(hours=24)  # Cache for 24 hours
         self.initialize_service()
 
     def initialize_service(self):
-        """Initialize Google Docs API service with automatic retry"""
+        """Initialize Google Docs API service"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
+                credentials = service_account.Credentials.from_service_account_info(
+                    json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
+                )
                 self.service = build('docs', 'v1', credentials=credentials)
                 logger.info("Google Docs service don setup!")
                 return
@@ -28,7 +37,7 @@ class GoogleDocQA:
                     logger.error(f"E don burst! No fit connect to Google Docs after {max_retries} tries: {e}")
                     raise
                 logger.warning(f"De try again to connect (try {attempt + 1})...")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(2 ** attempt)
 
     def _clean_cache(self):
         """Remove expired cache entries"""
@@ -38,11 +47,11 @@ class GoogleDocQA:
             del self.response_cache[key]
 
     def get_content_hash(self, content):
-        """Generate stable hash of document content"""
+        """Generate hash for document content"""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
     def parse_qa_pairs(self, content):
-        """Parse Q&A pairs with improved line handling"""
+        """Parse Q&A pairs"""
         qa_pairs = []
         current_q = current_a = None
         buffer = []
@@ -76,13 +85,13 @@ class GoogleDocQA:
         return qa_pairs
 
     def refresh_qa_pairs(self, force=False):
-        """Refresh Q&A pairs with enhanced error handling"""
+        """Refresh Q&A pairs"""
         try:
             if not force and datetime.now() - self.last_refresh < self.refresh_interval:
                 return True
 
             logger.info("De refresh the Q&A pairs from Google Doc...")
-            doc = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
+            doc = self.service.documents().get(documentId=os.getenv('GOOGLE_DOC_ID')).execute()
             
             content = []
             for element in doc.get('body', {}).get('content', []):
@@ -114,21 +123,18 @@ class GoogleDocQA:
             return False
 
     def get_answer(self, question, similarity_threshold=0.6):
-        """Get answer with intelligent matching and response caching"""
+        """Get answer with Naija flavor"""
         try:
-            self._clean_cache()  # Clean up old cache entries first
+            self._clean_cache()
             
             question_lower = question.lower().strip()
             if not question_lower:
                 return "Abeg ask question jare!"
 
-            # Check cache first
+            # Check cache first - ensures single response per question
             cache_key = hash(question_lower)
             if cache_key in self.response_cache:
-                cached = self.response_cache[cache_key]
-                if datetime.now() - cached['timestamp'] <= self.cache_expiry:
-                    logger.debug(f"Don see this question before: {question_lower[:50]}...")
-                    return cached['response']
+                return self.response_cache[cache_key]['response']
 
             # Find best match
             answer = self._find_best_match(question_lower, similarity_threshold)
@@ -141,7 +147,7 @@ class GoogleDocQA:
             else:
                 answer = self._naija_flavor(answer)
 
-            # Cache the response
+            # Cache the response for 24 hours
             self.response_cache[cache_key] = {
                 'response': answer,
                 'timestamp': datetime.now()
@@ -154,7 +160,7 @@ class GoogleDocQA:
             return "E don be! My brain no dey work now. Try again small time."
 
     def _find_best_match(self, question_lower, similarity_threshold):
-        """Find best matching answer with similarity scoring"""
+        """Find best matching answer"""
         best_match = None
         highest_score = 0
 
