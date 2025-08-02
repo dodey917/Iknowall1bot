@@ -9,26 +9,26 @@ class GoogleDocQA:
         self.qa_pairs = []
         self.last_refresh = datetime.min
         self.content_hash = None
-        self.refresh_interval = timedelta(minutes=5)
-        self.response_cache = {}  # New cache to track responses
+        self.refresh_interval = timedelta(minutes=5)  # Check for updates every 5 minutes
+        self.response_cache = {}  # Cache to track responses
         self.cache_expiry = timedelta(hours=1)  # Cache duration
         self.initialize_service()
 
     def initialize_service(self):
         """Initialize Google Docs API service with automatic retry"""
-        max_retries = 1
+        max_retries = 3
         for attempt in range(max_retries):
             try:
                 credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
                 self.service = build('docs', 'v1', credentials=credentials)
-                logger.info("Google Docs service initialized successfully")
+                logger.info("Google Docs service don setup!")
                 return
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Failed to initialize Google Docs service after {max_retries} attempts: {e}")
+                    logger.error(f"E don burst! No fit connect to Google Docs after {max_retries} tries: {e}")
                     raise
-                logger.warning(f"Retrying Google Docs initialization (attempt {attempt + 1})...")
-                time.sleep(2 ** attempt)
+                logger.warning(f"De try again to connect (try {attempt + 1})...")
+                time.sleep(2 ** attempt)  # Exponential backoff
 
     def _clean_cache(self):
         """Remove expired cache entries"""
@@ -81,7 +81,7 @@ class GoogleDocQA:
             if not force and datetime.now() - self.last_refresh < self.refresh_interval:
                 return True
 
-            logger.info("Refreshing Q&A pairs from Google Doc...")
+            logger.info("De refresh the Q&A pairs from Google Doc...")
             doc = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
             
             content = []
@@ -94,23 +94,23 @@ class GoogleDocQA:
 
             new_hash = self.get_content_hash(full_content)
             if not force and self.content_hash == new_hash:
-                logger.debug("No changes detected in Google Doc")
+                logger.debug("No new tin for Google Doc")
                 self.last_refresh = datetime.now()
                 return True
 
             new_pairs = self.parse_qa_pairs(full_content)
             if not new_pairs:
-                logger.warning("No Q&A pairs found in document")
+                logger.warning("No Q&A pairs inside this doc o!")
                 return False
 
             self.qa_pairs = new_pairs
             self.content_hash = new_hash
             self.last_refresh = datetime.now()
-            logger.info(f"Successfully refreshed {len(self.qa_pairs)} Q&A pairs")
+            logger.info(f"Don refresh {len(self.qa_pairs)} Q&A pairs")
             return True
 
         except Exception as e:
-            logger.error(f"Error refreshing Q&A pairs: {str(e)}", exc_info=True)
+            logger.error(f"Error don happen for refresh Q&A pairs: {str(e)}", exc_info=True)
             return False
 
     def get_answer(self, question, similarity_threshold=0.6):
@@ -120,14 +120,14 @@ class GoogleDocQA:
             
             question_lower = question.lower().strip()
             if not question_lower:
-                return "Please ask a question."
+                return "Abeg ask question jare!"
 
             # Check cache first
             cache_key = hash(question_lower)
             if cache_key in self.response_cache:
                 cached = self.response_cache[cache_key]
                 if datetime.now() - cached['timestamp'] <= self.cache_expiry:
-                    logger.debug(f"Returning cached response for: {question_lower[:50]}...")
+                    logger.debug(f"Don see this question before: {question_lower[:50]}...")
                     return cached['response']
 
             # Find best match
@@ -135,8 +135,11 @@ class GoogleDocQA:
             if not answer and self.refresh_qa_pairs():
                 answer = self._find_best_match(question_lower, similarity_threshold)
 
+            # Add Naija flavor to responses
             if not answer:
-                answer = "I couldn't find an answer to that question. Try rephrasing or ask about something else."
+                answer = "I no sabi answer to that question. Try ask am another way."
+            else:
+                answer = self._naija_flavor(answer)
 
             # Cache the response
             self.response_cache[cache_key] = {
@@ -147,8 +150,8 @@ class GoogleDocQA:
             return answer
 
         except Exception as e:
-            logger.error(f"Error finding answer: {str(e)}", exc_info=True)
-            return "I'm having trouble accessing my knowledge base right now. Please try again later."
+            logger.error(f"Wahala don happen: {str(e)}", exc_info=True)
+            return "E don be! My brain no dey work now. Try again small time."
 
     def _find_best_match(self, question_lower, similarity_threshold):
         """Find best matching answer with similarity scoring"""
@@ -167,3 +170,28 @@ class GoogleDocQA:
                 best_match = a
 
         return best_match if highest_score >= similarity_threshold else None
+
+    def _naija_flavor(self, text):
+        """Add Naija pidgin flavor to responses"""
+        phrases = {
+            "hello": "How you dey!",
+            "hi": "Wetin dey happen!",
+            "thank you": "No wahala!",
+            "thanks": "I dey appreciate!",
+            "sorry": "No vex!",
+            "please": "Abeg!",
+            "help": "I go help you!",
+            "what's up": "How body!",
+            "how are you": "How you dey feel today?"
+        }
+        
+        # Convert specific phrases
+        for eng, naija in phrases.items():
+            if eng.lower() in text.lower():
+                return naija
+        
+        # Add general Naija flavor
+        if "?" in text:
+            return text.replace("?", " abi?")
+        
+        return f"{text}... no be so?"
