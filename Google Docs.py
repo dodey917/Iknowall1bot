@@ -16,7 +16,7 @@ class GoogleDocQA:
 
     def initialize_service(self):
         """Initialize Google Docs API service with automatic retry"""
-        max_retries = 3
+        max_retries = 1
         for attempt in range(max_retries):
             try:
                 credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
