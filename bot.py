@@ -1,27 +1,39 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 from datetime import datetime, timedelta
 
-# Load environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID")
-ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
-PORT = int(os.getenv("PORT", 10000))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-RENDER = os.getenv("RENDER", "false").lower() == "true"
+# Load environment variables with validation
+def load_env_vars():
+    required_vars = ['BOT_TOKEN', 'GOOGLE_DOC_ID', 'GOOGLE_CREDENTIALS_JSON']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    return {
+        'BOT_TOKEN': os.getenv('BOT_TOKEN'),
+        'GOOGLE_DOC_ID': os.getenv('GOOGLE_DOC_ID'),
+        'GOOGLE_CREDENTIALS_JSON': json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON')),
+        'ADMIN_IDS': [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(",") if id.strip()],
+        'PORT': int(os.getenv('PORT', 10000)),
+        'WEBHOOK_URL': os.getenv('WEBHOOK_URL'),
+        'RENDER': os.getenv('RENDER', 'false').lower() == 'true'
+    }
 
+# Initialize with error handling
+try:
+    config = load_env_vars()
+except Exception as e:
+    logging.error(f"Configuration error: {e}")
+    raise
+
+# Rest of your bot code remains the same, using config['BOT_TOKEN'] etc.
 # Configure logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
