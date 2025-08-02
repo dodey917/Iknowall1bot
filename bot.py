@@ -96,6 +96,188 @@ class GoogleDocQA:
         
         if self.refresh_qa_pairs():
             return self._get_cached_answer(question)
+        return "Abeg no vex, my brain no dey work well well now. Try again abeg."
+
+    def _get_cached_answer(self, question):
+        question_lower = question.lower().strip()
+        
+        for q, a in self.qa_pairs:
+            if question_lower == q:
+                return a
+        
+        for q, a in self.qa_pairs:
+            if question_lower in q or q in question_lower:
+                return a
+        
+        question_words = set(question_lower.split())
+        best_match = None
+        best_score = 0
+        
+        for q, a in self.qa_pairs:
+            q_words = set(q.split())
+            common_words = question_words & q_words
+            score = len(common_words)
+            
+            if score > best_score and score >= len(question_words)/2:
+                best_score = score
+                best_match = a
+        
+        return best_match if best_match else None
+
+# Initialize the Q&A system
+qa_system = GoogleDocQA()
+
+# Telegram Bot Handlers with Naija Pidgin responses
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Wetin you want? Make I help you abi you just dey disturb me?")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "Abeg which kain help you want?\n\n"
+        "Wetin I fit do:\n"
+        "/start - Make I abuse you\n"
+        "/help - See wetin I fit do\n"
+        "/refresh - If you be ogbonge admin, make I refresh my brain\n\n"
+        "Just yarn your matter make I see if I fit answer am!"
+    )
+    await update.message.reply_text(help_text)
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in [7697559889, 6089861817]:
+        await update.message.reply_text("Ode! Who you be? You no be admin, comot for here!")
+        return
+    
+    if qa_system.refresh_qa_pairs(force=True):
+        await update.message.reply_text("Okay okay, I don refresh my brain small. Hope say e better now?")
+    else:
+        await update.message.reply_text("Chai! Something scatter. My brain no gree refresh. Try again abeg.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type in ['group', 'supergroup']:
+        if not update.message.text.startswith('@your_bot_username'):
+            return
+    
+    question = update.message.text
+    if update.message.chat.type in ['group', 'supergroup']:
+        question = question.replace('@your_bot_username', '').strip()
+    
+    last_question = context.chat_data.get('last_question')
+    last_answer = context.chat_data.get('last_answer')
+    
+    if question == last_question and last_answer:
+        return
+    
+    answer = qa_system.get_answer(question)
+    
+    if not answer:
+        responses = [
+            "Abeg comot for here! I no know wetin you dey talk.",
+            "Na which kain question be this? I no get answer for your mumu question.",
+            "You dey whine me abi? Ask better question!",
+            "Chai! Your question too taya me. No fit answer am.",
+            "Na only God know answer to this your question. Go ask Pastor."
+        ]
+        answer = responses[hash(question) % len(responses)]
+    
+    context.chat_data['last_question'] = question
+    context.chat_data['last_answer'] = answer
+    
+    await update.message.reply_text(answer)
+
+def main():
+    try:
+        logger.info("Starting bot...")
+        
+        if not qa_system.refresh_qa_pairs(force=True):
+            logger.error("Failed to initialize Google Docs connection")
+            return
+        
+        app = Application.builder().token(BOT_TOKEN).build()
+        
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CommandHandler("refresh", refresh_command))
+        
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        logger.info("Polling...")
+        app.run_polling(
+            poll_interval=3,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+    except Conflict as e:
+        logger.error("Another bot instance is already running. Exiting.")
+    except Exception as e:
+        logger.error(f"Bot crashed with error: {e}")
+    finally:
+        logger.info("Bot stopped")
+
+if __name__ == "__main__":
+    main()
+    def initialize_service(self):
+        credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
+        self.service = build('docs', 'v1', credentials=credentials)
+        
+    def get_content_hash(self, content):
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+    def refresh_qa_pairs(self, force=False):
+        try:
+            if not self.service:
+                self.initialize_service()
+                
+            if not force and datetime.now() - self.last_refresh < self.refresh_interval:
+                return True
+                
+            doc = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
+            content = ""
+            for element in doc.get('body', {}).get('content', []):
+                if 'paragraph' in element:
+                    for para_elem in element['paragraph']['elements']:
+                        if 'textRun' in para_elem:
+                            content += para_elem['textRun']['content']
+            
+            new_hash = self.get_content_hash(content)
+            if not force and self.content_hash == new_hash:
+                self.last_refresh = datetime.now()
+                return True
+            
+            new_pairs = []
+            current_q = current_a = None
+            
+            for line in content.split('\n'):
+                line = line.strip()
+                if line.startswith('Q:'):
+                    if current_q and current_a:
+                        new_pairs.append((current_q.lower(), current_a))
+                    current_q = line[2:].strip()
+                    current_a = None
+                elif line.startswith('A:'):
+                    current_a = line[2:].strip()
+            
+            if current_q and current_a:
+                new_pairs.append((current_q.lower(), current_a))
+            
+            self.qa_pairs = new_pairs
+            self.content_hash = new_hash
+            self.last_refresh = datetime.now()
+            logger.info(f"Refreshed Q&A pairs. Found {len(self.qa_pairs)} questions.")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error refreshing Q&A: {e}")
+            return False
+
+    def get_answer(self, question):
+        answer = self._get_cached_answer(question)
+        if answer:
+            return answer
+        
+        if self.refresh_qa_pairs():
+            return self._get_cached_answer(question)
         return "Abeg no vex, my brain no dey work well well now. Try again later abeg."
 
     def _get_cached_answer(self, question):
