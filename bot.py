@@ -80,7 +80,7 @@ class GoogleDocQA:
                     current_q = line[2:].strip()
                     current_a = None
                 elif line.startswith('A:'):
-                    current_a = line[2:].strip()
+                    current_a = line[1:].strip()
             
             if current_q and current_a:
                 new_pairs.append((current_q.lower(), current_a))
@@ -143,7 +143,7 @@ qa_system = GoogleDocQA()
 
 # Telegram Bot Handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm your Q&A bot. Ask me anything from my knowledge base!")
+    await update.message.reply_text("Hello! I be I Know All 📚 E be like say you don jam correct plug. Run your matter now!")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -162,7 +162,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in [7697559889, 6089861817]:  # Replace with your admin user IDs
         await update.message.reply_text("🚫 This command is for admins only")
         return
-    
+ Ask
     if qa_system.refresh_qa_pairs(force=True):
         await update.message.reply_text("✅ Knowledge base refreshed successfully!")
     else:
