@@ -1,7 +1,6 @@
-telegram-google-docs-bot/
-├── .env.example
+telegram-bot/
+├── .env
 ├── .gitignore
-├── README.md
-├── requirements.txt
 ├── bot.py
-└── service_account.json (keep this secret!)
+├── requirements.txt
+└── README.md
