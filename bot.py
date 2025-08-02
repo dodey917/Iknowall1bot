@@ -10,7 +10,7 @@ import hashlib
 # Configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8270027311:AAH5xcgSuyrfNEadhx7TM2TGYYQ3BWZpFDU')
 GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID', '14zSSmCznz4emYyq4BG5rO1oCS3Wqz8t8nt3omKb8ZQY')
-ADMIN_IDS = [6089861817, 5584801763]  # Add your admin IDs here
+ADMIN_IDS = [6089861817, 5584801763, 7697559889]  # Add your admin IDs here
 SERVICE_ACCOUNT_INFO = {
     "type": "service_account",
     "project_id": "telegrambotproject-467718",
