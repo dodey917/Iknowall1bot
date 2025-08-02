@@ -6,8 +6,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import hashlib
-import time
-import asyncio
 
 # Configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8270027311:AAH5xcgSuyrfNEadhx7TM2TGYYQ3BWZpFDU')
@@ -61,12 +59,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables
-qa_pairs = {}
-last_doc_hash = ""
-last_checked = 0
-CHECK_INTERVAL = 300  # 5 minutes in seconds
-
 class GoogleDocService:
     def __init__(self):
         self.credentials = service_account.Credentials.from_service_account_info(
@@ -74,10 +66,12 @@ class GoogleDocService:
             scopes=['https://www.googleapis.com/auth/documents.readonly']
         )
         self.service = build('docs', 'v1', credentials=self.credentials)
+        self.qa_pairs = {}
+        self.last_doc_hash = ""
 
-    def get_document_content(self, document_id):
+    def get_document_content(self):
         try:
-            document = self.service.documents().get(documentId=document_id).execute()
+            document = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
             content = []
             for elem in document.get('body', {}).get('content', []):
                 if 'paragraph' in elem:
@@ -89,61 +83,59 @@ class GoogleDocService:
             logger.error(f"An error occurred: {error}")
             return None
 
-def parse_content(content):
-    pairs = {}
-    current_q = None
-    
-    lines = content.split('\n')
-    for line in lines:
-        line = line.strip()
-        if line.startswith('Q:'):
-            current_q = line[2:].strip().lower()
-        elif line.startswith('A:') and current_q:
-            pairs[current_q] = line[2:].strip()
-            current_q = None
-    return pairs
+    def parse_content(self, content):
+        pairs = {}
+        current_q = None
+        
+        lines = content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Q:'):
+                current_q = line[2:].strip().lower()
+            elif line.startswith('A:') and current_q:
+                pairs[current_q] = line[2:].strip()
+                current_q = None
+        return pairs
 
-async def check_doc_updates(app: Application):
-    global qa_pairs, last_doc_hash, last_checked
-    
-    while True:
-        current_time = time.time()
-        if current_time - last_checked < CHECK_INTERVAL:
-            await asyncio.sleep(60)  # Sleep for 1 minute before checking again
-            continue
-        
-        last_checked = current_time
-        doc_service = GoogleDocService()
-        content = doc_service.get_document_content(GOOGLE_DOC_ID)
-        
+    def check_for_updates(self):
+        content = self.get_document_content()
         if content is None:
-            await asyncio.sleep(60)
-            continue
+            return False
         
         content_hash = hashlib.md5(content.encode()).hexdigest()
         
-        if content_hash != last_doc_hash:
-            last_doc_hash = content_hash
-            new_pairs = parse_content(content)
-            
-            if new_pairs != qa_pairs:
-                qa_pairs = new_pairs
+        if content_hash != self.last_doc_hash:
+            self.last_doc_hash = content_hash
+            new_pairs = self.parse_content(content)
+            if new_pairs != self.qa_pairs:
+                self.qa_pairs = new_pairs
                 logger.info("QA pairs updated from Google Doc")
-                
-                # Notify admin about the update
-                for admin_id in ADMIN_IDS:
-                    try:
-                        await app.bot.send_message(
-                            chat_id=admin_id,
-                            text="📝 Google Doc content has been updated. Bot responses refreshed."
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to notify admin {admin_id}: {e}")
+                return True
+        return False
 
-        await asyncio.sleep(60)
+    def get_response(self, user_message):
+        user_message = user_message.lower().strip()
+        
+        # Check for direct matches first
+        if user_message in self.qa_pairs:
+            return self.qa_pairs[user_message]
+        
+        # Try to find partial matches
+        for question, answer in self.qa_pairs.items():
+            if question in user_message or any(word in user_message for word in question.split()):
+                return answer
+        
+        # If no match found, return default response
+        if self.qa_pairs:
+            responses = list(self.qa_pairs.values())
+            return "Abeg, no waste my time. " + " ".join(responses[:2])[:200] + "..."
+        return "Wetin you dey talk? No understand your grammar. Try ask am another way."
+
+# Initialize Google Doc service
+doc_service = GoogleDocService()
+doc_service.check_for_updates()  # Initial load
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     await update.message.reply_text(
         f"Abeg wetin you want? Na me be 'I Know All'.\n"
         f"Creator na Arewa Michael. Ask me anything, but no expect sweet talk."
@@ -159,47 +151,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global qa_pairs
+    # Check for doc updates on each message (simple alternative to job queue)
+    if doc_service.check_for_updates():
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text="📝 Google Doc content has been updated. Bot responses refreshed."
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin {admin_id}: {e}")
     
-    user_message = update.message.text.lower().strip()
-    response = None
-    
-    # Check for direct matches first
-    if user_message in qa_pairs:
-        response = qa_pairs[user_message]
-    else:
-        # Try to find partial matches or combine answers
-        for question, answer in qa_pairs.items():
-            if question in user_message or any(word in user_message for word in question.split()):
-                response = answer
-                break
-        
-        # If no match found, combine random answers (for Nigerian slang effect)
-        if not response and qa_pairs:
-            responses = list(qa_pairs.values())
-            response = "Abeg, no waste my time. " + " ".join(responses[:2])[:200] + "..."
-    
-    if not response:
-        response = "Wetin you dey talk? No understand your grammar. Try ask am another way."
-    
+    response = doc_service.get_response(update.message.text)
     await update.message.reply_text(response)
-
-async def post_init(app: Application):
-    # Initialize Google Doc content
-    global qa_pairs, last_doc_hash
-    
-    doc_service = GoogleDocService()
-    content = doc_service.get_document_content(GOOGLE_DOC_ID)
-    if content:
-        qa_pairs = parse_content(content)
-        last_doc_hash = hashlib.md5(content.encode()).hexdigest()
-    
-    # Start the background task
-    app.create_task(check_doc_updates(app))
 
 def main():
     # Create the Application and pass it your bot's token.
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
