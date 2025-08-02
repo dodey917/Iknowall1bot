@@ -1,215 +1,186 @@
 import os
-import json
 import logging
-import hashlib
-from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from telegram.error import Conflict
+from googleapiclient.errors import HttpError
+import re
+import json
+from datetime import datetime, timedelta
+
+# Load environment variables
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
+PORT = int(os.getenv('PORT', 10000))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+RENDER = os.getenv('RENDER', 'false').lower() == 'true'
 
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
-# Load environment variables
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
-GOOGLE_CREDENTIALS = json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
+# Global variable to store cached responses and last update time
+cached_responses = {}
+last_update_time = None
+CACHE_EXPIRY_HOURS = 1  # Refresh cache every hour
 
-class GoogleDocQA:
-    def _init_(self):
-        self.service = None
-        self.qa_pairs = []
-        self.last_refresh = datetime.min
-        self.content_hash = None
-        self.refresh_interval = timedelta(minutes=5)  # Check for updates every 5 minutes
+# Initialize Google Docs service
+def init_google_docs():
+    try:
+        # Parse the credentials from the environment variable
+        creds_json = json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
+        credentials = service_account.Credentials.from_service_account_info(creds_json)
+        service = build('docs', 'v1', credentials=credentials)
+        return service
+    except Exception as e:
+        logger.error(f"Error initializing Google Docs service: {e}")
+        raise
 
-    def initialize_service(self):
-        """Initialize the Google Docs API service"""
-        credentials = service_account.Credentials.from_service_account_info(GOOGLE_CREDENTIALS)
-        self.service = build('docs', 'v1', credentials=credentials)
-        
-    def get_content_hash(self, content):
-        """Generate a hash of the document content to detect changes"""
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
-
-    def refresh_qa_pairs(self, force=False):
-        """Refresh Q&A pairs if document changed or forced"""
-        try:
-            if not self.service:
-                self.initialize_service()
-                
-            # Skip refresh if not needed
-            if not force and datetime.now() - self.last_refresh < self.refresh_interval:
-                return True
-                
-            doc = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
-            content = ""
-            for element in doc.get('body', {}).get('content', []):
-                if 'paragraph' in element:
-                    for para_elem in element['paragraph']['elements']:
-                        if 'textRun' in para_elem:
-                            content += para_elem['textRun']['content']
-            
-            # Check if content changed
-            new_hash = self.get_content_hash(content)
-            if not force and self.content_hash == new_hash:
-                self.last_refresh = datetime.now()
-                return True  # No changes detected
-            
-            # Parse Q&A pairs
-            new_pairs = []
-            current_q = current_a = None
-            
-            for line in content.split('\n'):
-                line = line.strip()
-                if line.startswith('Q:'):
-                    if current_q and current_a:
-                        new_pairs.append((current_q.lower(), current_a))
-                    current_q = line[2:].strip()
-                    current_a = None
-                elif line.startswith('A:'):
-                    current_a = line[2:].strip()
-            
-            if current_q and current_a:
-                new_pairs.append((current_q.lower(), current_a))
-            
-            # Update only if parsing succeeded
-            self.qa_pairs = new_pairs
-            self.content_hash = new_hash
-            self.last_refresh = datetime.now()
-            logger.info(f"Refreshed Q&A pairs. Found {len(self.qa_pairs)} questions.")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error refreshing Q&A: {e}")
-            return False
-
-    def get_answer(self, question):
-        """Get answer with automatic refresh check"""
-        # First try with current data
-        answer = self._get_cached_answer(question)
-        if answer:
-            return answer
-        
-        # If no answer found, refresh and try again
-        if self.refresh_qa_pairs():
-            return self._get_cached_answer(question)
-        return "⚠ Couldn't refresh knowledge base. Please try again later."
-
-    def _get_cached_answer(self, question):
-        """Internal method to get answer from cached data"""
-        question_lower = question.lower().strip()
-        
-        # 1. Try exact match first
-        for q, a in self.qa_pairs:
-            if question_lower == q:
-                return a
-        
-        # 2. Try question contains user's query or vice versa
-        for q, a in self.qa_pairs:
-            if question_lower in q or q in question_lower:
-                return a
-        
-        # 3. Try word similarity
-        question_words = set(question_lower.split())
-        best_match = None
-        best_score = 0
-        
-        for q, a in self.qa_pairs:
-            q_words = set(q.split())
-            common_words = question_words & q_words
-            score = len(common_words)
-            
-            if score > best_score and score >= len(question_words)/2:
-                best_score = score
-                best_match = a
-        
-        return best_match if best_match else None
-
-# Initialize the Q&A system
-qa_system = GoogleDocQA()
-
-# Telegram Bot Handlers
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm your Q&A bot. Ask me anything from my knowledge base!")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "📚 I'm a Q&A bot powered by Google Docs!\n\n"
-        "Available commands:\n"
-        "/start - Welcome message\n"
-        "/help - This help message\n"
-        "/refresh - Admin: Force refresh knowledge base\n\n"
-        "Just ask me any question and I'll try to answer it!"
-    )
-    await update.message.reply_text(help_text)
-
-async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to force refresh the knowledge base"""
-    user = update.effective_user
-    if user.id not in [12345678, 87654321]:  # Replace with your admin user IDs
-        await update.message.reply_text("🚫 This command is for admins only")
-        return
+# Fetch and parse the Google Doc
+async def fetch_responses():
+    global cached_responses, last_update_time
     
-    if qa_system.refresh_qa_pairs(force=True):
-        await update.message.reply_text("✅ Knowledge base refreshed successfully!")
-    else:
-        await update.message.reply_text("⚠ Failed to refresh knowledge base")
+    # Check if cache is still valid
+    if last_update_time and datetime.now() - last_update_time < timedelta(hours=CACHE_EXPIRY_HOURS):
+        return cached_responses
+    
+    try:
+        service = init_google_docs()
+        doc = service.documents().get(documentId=GOOGLE_DOC_ID).execute()
+        doc_content = doc.get('body', {}).get('content', [])
+        
+        responses = {}
+        current_question = None
+        current_answer = []
+        
+        for element in doc_content:
+            if 'paragraph' in element:
+                for paragraph_element in element['paragraph']['elements']:
+                    if 'textRun' in paragraph_element:
+                        text = paragraph_element['textRun']['content'].strip()
+                        
+                        # Check if this is a question
+                        if text.lower().startswith('q:'):
+                            # If we have a current question, save it before starting new one
+                            if current_question:
+                                responses[current_question.lower()] = ' '.join(current_answer).strip()
+                            
+                            current_question = text[2:].strip()
+                            current_answer = []
+                        # Check if this is an answer
+                        elif text.lower().startswith('a:'):
+                            current_answer.append(text[2:].strip())
+        
+        # Add the last question-answer pair if it exists
+        if current_question:
+            responses[current_question.lower()] = ' '.join(current_answer).strip()
+        
+        # Update cache
+        cached_responses = responses
+        last_update_time = datetime.now()
+        logger.info(f"Updated responses cache with {len(responses)} Q&A pairs")
+        
+        return responses
+    except HttpError as error:
+        logger.error(f"An error occurred: {error}")
+        return cached_responses  # Return cached version if available
+    except Exception as e:
+        logger.error(f"Unexpected error fetching responses: {e}")
+        return cached_responses  # Return cached version if available
+
+# Find the best matching response
+async def find_best_response(user_message, responses):
+    user_message = user_message.lower().strip()
+    
+    # First try exact match
+    if user_message in responses:
+        return responses[user_message]
+    
+    # Then try partial matches
+    for question, answer in responses.items():
+        if question in user_message or user_message in question:
+            return answer
+    
+    # If no direct match, try to find keywords and combine answers
+    keywords = [
+        'who', 'what', 'when', 'where', 'why', 'how',
+        'are you', 'can you', 'will you', 'do you',
+        'is it', 'am i', 'should i', 'life', 'fact'
+    ]
+    
+    found_answers = []
+    for keyword in keywords:
+        if keyword in user_message:
+            for q, a in responses.items():
+                if keyword in q:
+                    found_answers.append(a)
+    
+    if found_answers:
+        # Combine the answers with some Nigerian flavor
+        combined = "Abeg, no vex. From wetin I sabi: \n\n" + "\n\n".join(found_answers[:3])
+        return combined + "\n\nNo be me talk am, na life show us."
+    
+    # Default response if nothing matches
+    return "Ah-ah! I no fit find answer for your question for my database. Na wa o! Life hard sha."
+
+# Telegram bot handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Wetin you want? I Know All dey here to tell you raw truth about life. "
+        "Ask me anything, but no expect sugar-coated lies. "
+        f"\n\nCreated by Arewa Michael"
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type in ['group', 'supergroup']:
-        if not update.message.text.startswith('@your_bot_username'):
-            return
+    user_message = update.message.text
+    user_id = update.message.from_user.id
     
-    answer = qa_system.get_answer(update.message.text)
-    if not answer:
-        answer = "🤔 I don't have an answer for that. Try rephrasing your question."
-    await update.message.reply_text(answer)
+    logger.info(f"Received message from user {user_id}: {user_message}")
+    
+    # Fetch responses from Google Doc (with caching)
+    responses = await fetch_responses()
+    
+    # Get the best response
+    response = await find_best_response(user_message, responses)
+    
+    # Send the response
+    await update.message.reply_text(response)
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and hasattr(update, 'message'):
+        await update.message.reply_text(
+            "Abeg, something scatter! Try again small time. "
+            "Na life just show us pepper."
+        )
 
 def main():
-    try:
-        logger.info("Starting bot...")
-        
-        # Initialize and test Google Docs connection
-        if not qa_system.refresh_qa_pairs(force=True):
-            logger.error("Failed to initialize Google Docs connection")
-            return
-        
-        app = Application.builder().token(BOT_TOKEN).build()
-        
-        # Command handlers
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("help", help_command))
-        app.add_handler(CommandHandler("refresh", refresh_command))
-        
-        # Message handler
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        logger.info("Polling...")
-        app.run_polling(
-            poll_interval=3,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
+    # Create the Application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+    
+    # Start the bot
+    if RENDER:
+        # Production with webhook
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
         )
-        
-    except Conflict as e:
-        logger.error("Another bot instance is already running. Exiting.")
-    except Exception as e:
-        logger.error(f"Bot crashed with error: {e}")
-    finally:
-        logger.info("Bot stopped")
+        logger.info("Bot running in production mode with webhook")
+    else:
+        # Development with polling
+        application.run_polling()
+        logger.info("Bot running in development mode with polling")
 
-if _name_ == "_main_":
+if __name__ == '__main__':
     main()
