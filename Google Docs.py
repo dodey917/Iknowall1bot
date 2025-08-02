@@ -1,5 +1,7 @@
 import hashlib
 from datetime import datetime, timedelta
+import time
+from difflib import SequenceMatcher
 
 class GoogleDocQA:
     def __init__(self):
@@ -7,7 +9,9 @@ class GoogleDocQA:
         self.qa_pairs = []
         self.last_refresh = datetime.min
         self.content_hash = None
-        self.refresh_interval = timedelta(minutes=5)  # Check for updates every 5 minutes
+        self.refresh_interval = timedelta(minutes=5)
+        self.response_cache = {}  # New cache to track responses
+        self.cache_expiry = timedelta(hours=1)  # Cache duration
         self.initialize_service()
 
     def initialize_service(self):
@@ -24,11 +28,18 @@ class GoogleDocQA:
                     logger.error(f"Failed to initialize Google Docs service after {max_retries} attempts: {e}")
                     raise
                 logger.warning(f"Retrying Google Docs initialization (attempt {attempt + 1})...")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(2 ** attempt)
+
+    def _clean_cache(self):
+        """Remove expired cache entries"""
+        now = datetime.now()
+        expired_keys = [k for k, v in self.response_cache.items() if now - v['timestamp'] > self.cache_expiry]
+        for key in expired_keys:
+            del self.response_cache[key]
 
     def get_content_hash(self, content):
         """Generate stable hash of document content"""
-        return hashlib.sha256(content.encode('utf-8')).hexdigest()  # Using SHA-256 for better collision resistance
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
     def parse_qa_pairs(self, content):
         """Parse Q&A pairs with improved line handling"""
@@ -52,13 +63,12 @@ class GoogleDocQA:
                 flush_buffer()
                 continue
 
-            # Handle multi-line Q/A items
             if line.startswith(('Q:', 'A:')) and buffer:
                 flush_buffer()
 
             buffer.append(line)
 
-        flush_buffer()  # Process remaining buffer
+        flush_buffer()
 
         if current_q and current_a:
             qa_pairs.append((current_q.lower(), current_a))
@@ -68,14 +78,12 @@ class GoogleDocQA:
     def refresh_qa_pairs(self, force=False):
         """Refresh Q&A pairs with enhanced error handling"""
         try:
-            # Skip if not forced and within refresh interval
             if not force and datetime.now() - self.last_refresh < self.refresh_interval:
                 return True
 
             logger.info("Refreshing Q&A pairs from Google Doc...")
             doc = self.service.documents().get(documentId=GOOGLE_DOC_ID).execute()
             
-            # Extract document content
             content = []
             for element in doc.get('body', {}).get('content', []):
                 if 'paragraph' in element:
@@ -84,14 +92,12 @@ class GoogleDocQA:
                             content.append(para_elem['textRun']['content'])
             full_content = '\n'.join(content)
 
-            # Check for content changes
             new_hash = self.get_content_hash(full_content)
             if not force and self.content_hash == new_hash:
                 logger.debug("No changes detected in Google Doc")
                 self.last_refresh = datetime.now()
                 return True
 
-            # Parse and update Q&A pairs
             new_pairs = self.parse_qa_pairs(full_content)
             if not new_pairs:
                 logger.warning("No Q&A pairs found in document")
@@ -108,24 +114,37 @@ class GoogleDocQA:
             return False
 
     def get_answer(self, question, similarity_threshold=0.6):
-        """Get answer with intelligent matching"""
+        """Get answer with intelligent matching and response caching"""
         try:
+            self._clean_cache()  # Clean up old cache entries first
+            
             question_lower = question.lower().strip()
             if not question_lower:
                 return "Please ask a question."
 
-            # Try cached answers first
+            # Check cache first
+            cache_key = hash(question_lower)
+            if cache_key in self.response_cache:
+                cached = self.response_cache[cache_key]
+                if datetime.now() - cached['timestamp'] <= self.cache_expiry:
+                    logger.debug(f"Returning cached response for: {question_lower[:50]}...")
+                    return cached['response']
+
+            # Find best match
             answer = self._find_best_match(question_lower, similarity_threshold)
-            if answer:
-                return answer
-
-            # If no match, refresh and try again
-            if self.refresh_qa_pairs():
+            if not answer and self.refresh_qa_pairs():
                 answer = self._find_best_match(question_lower, similarity_threshold)
-                if answer:
-                    return answer
 
-            return "I couldn't find an answer to that question. Try rephrasing or ask about something else."
+            if not answer:
+                answer = "I couldn't find an answer to that question. Try rephrasing or ask about something else."
+
+            # Cache the response
+            self.response_cache[cache_key] = {
+                'response': answer,
+                'timestamp': datetime.now()
+            }
+
+            return answer
 
         except Exception as e:
             logger.error(f"Error finding answer: {str(e)}", exc_info=True)
@@ -133,8 +152,6 @@ class GoogleDocQA:
 
     def _find_best_match(self, question_lower, similarity_threshold):
         """Find best matching answer with similarity scoring"""
-        from difflib import SequenceMatcher
-
         best_match = None
         highest_score = 0
 
