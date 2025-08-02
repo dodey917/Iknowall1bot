@@ -147,7 +147,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📚 I'm a Q&A bot powered by Google Docs!\n\n"
+        "📚 E be like say you don jam correct plug. Run your matter now\n\n"
         "Available commands:\n"
         "/start - Welcome message\n"
         "/help - This help message\n"
@@ -159,7 +159,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to force refresh the knowledge base"""
     user = update.effective_user
-    if user.id not in [12345678, 87654321]:  # Replace with your admin user IDs
+    if user.id not in [7697559889, 6089861817]:  # Replace with your admin user IDs
         await update.message.reply_text("🚫 This command is for admins only")
         return
     
